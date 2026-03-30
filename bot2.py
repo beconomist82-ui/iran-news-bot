@@ -15,7 +15,7 @@ KST = timezone(timedelta(hours=9))
 def fetch_news():
     url = "https://newsapi.org/v2/everything"
     params = {
-        "q": "iran war OR iran israel conflict",
+        "q": "iran war OR iran israel conflict OR iran strike OR iran missile",
         "language": "en",
         "sortBy": "publishedAt",
         "pageSize": 5,
@@ -23,10 +23,10 @@ def fetch_news():
     }
 
     try:
-        res = requests.get(url, params=params, timeout=20)
-        if res.status_code != 200:
+        response = requests.get(url, params=params, timeout=20)
+        if response.status_code != 200:
             return []
-        data = res.json()
+        data = response.json()
         return data.get("articles", [])
     except Exception:
         return []
@@ -34,49 +34,80 @@ def fetch_news():
 
 def summarize(articles):
     if not articles:
-        return "최근 뉴스 없음"
+        return "- 최근 주요 뉴스가 없습니다."
 
-    titles = "\n".join([a.get("title", "") for a in articles if a.get("title")])
+    titles = []
+    for article in articles:
+        title = article.get("title")
+        if title:
+            titles.append(title)
+
+    if not titles:
+        return "- 최근 주요 뉴스가 없습니다."
+
+    joined_titles = "\n".join(titles)
+
+    prompt = f"""
+아래는 이란 전쟁 관련 영어 뉴스 제목들이다.
+
+반드시 다음 규칙을 지켜라.
+1. 답변은 한국어로만 작성할 것
+2. 정확히 3개의 불릿만 작성할 것
+3. 각 줄은 "- "로 시작할 것
+4. 짧고 자연스러운 한국어 브리핑 문장으로 쓸 것
+5. 영어 제목을 그대로 복사하지 말 것
+6. 추측하지 말고 제목에 있는 내용만 바탕으로 요약할 것
+
+뉴스 제목:
+{joined_titles}
+"""
 
     try:
         response = client.responses.create(
             model="gpt-5-mini",
-            input=f"다음 뉴스 제목들을 한국어로 3줄로 간단히 요약해줘.\n{titles}",
+            input=prompt,
         )
-        return response.output_text.strip()
+        text = response.output_text.strip()
+
+        if not text:
+            return "- 한국어 요약 생성에 실패했습니다."
+
+        return text
     except Exception:
-        return titles or "요약 실패"
+        return "- 한국어 요약 생성에 실패했습니다."
+
+
+def build_message(summary, articles):
+    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
+    message = f"🛰 이란 뉴스 브리핑\n기준시각: {now} KST\n\n{summary}"
+
+    links = []
+    for index, article in enumerate(articles[:3], 1):
+        url = article.get("url")
+        if url:
+            links.append(f"{index}. {url}")
+
+    if links:
+        message += "\n\n원문 링크:\n" + "\n".join(links)
+
+    return message
 
 
 def send_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    requests.post(
-        url,
-        json={
-            "chat_id": TELEGRAM_CHAT_ID,
-            "text": text,
-            "disable_web_page_preview": True,
-        },
-        timeout=20,
-    )
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    requests.post(url, json=payload, timeout=20)
 
 
 def main():
     articles = fetch_news()
     summary = summarize(articles)
-    now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-
-    message = f"🛰 이란 뉴스 브리핑\n기준시각: {now} KST\n\n{summary}"
-
-    if articles:
-        links = []
-        for i, article in enumerate(articles[:3], 1):
-            url = article.get("url")
-            if url:
-                links.append(f"{i}. {url}")
-        if links:
-            message += "\n\n원문 링크:\n" + "\n".join(links)
-
+    message = build_message(summary, articles)
     send_message(message)
 
 
