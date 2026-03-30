@@ -26,6 +26,8 @@ def fetch_news():
 
     try:
         res = requests.get(url, params=params, timeout=20)
+        if res.status_code != 200:
+            return []
         data = res.json()
         return data.get("articles", [])
     except:
