@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone, timedelta
 from openai import OpenAI
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -27,28 +27,25 @@ def fetch_news():
     try:
         res = requests.get(url, params=params, timeout=20)
         data = res.json()
-        return data.get("articles", []), None
-    except Exception:
-        return [], "뉴스 가져오기 실패"
+        return data.get("articles", [])
+    except:
+        return []
 
 
-def summarize(articles, error):
-    if error:
-        return error
-
+def summarize(articles):
     if not articles:
-        return "최근 1시간 주요 뉴스 없음"
+        return "최근 뉴스 없음"
 
-    text = "\n".join([a["title"] for a in articles])
+    titles = "\n".join([a["title"] for a in articles])
 
     try:
         response = client.responses.create(
             model="gpt-5-mini",
-            input=f"다음 뉴스 제목들을 한국어로 3줄 요약:\n{text}",
+            input=f"다음 뉴스들을 한국어로 3줄 요약:\n{titles}",
         )
         return response.output_text.strip()
-    except Exception:
-        return text
+    except:
+        return titles
 
 
 def send(msg):
@@ -57,8 +54,8 @@ def send(msg):
 
 
 def main():
-    articles, error = fetch_news()
-    summary = summarize(articles, error)
+    articles = fetch_news()
+    summary = summarize(articles)
 
     now = datetime.now(KST).strftime("%H:%M")
 
