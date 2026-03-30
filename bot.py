@@ -30,7 +30,7 @@ def gdelt_query_url() -> str:
             'AND (war OR conflict OR strike OR airstrike OR missile OR drone OR attack OR retaliation)'
         ),
         "mode": "ArtList",
-        "maxrecords": "15",
+        "maxrecords": "10",
         "format": "json",
         "sort": "DateDesc",
         "startdatetime": start.strftime("%Y%m%d%H%M%S"),
@@ -50,42 +50,50 @@ def normalize_text(text: str) -> str:
 def normalize_url(url: str) -> str:
     if not url:
         return ""
-    return url.split("?")[0].strip().lower()
+    return url.split("?")[0].strip()
 
 
-def fetch_articles() -> tuple[list[dict], str | None]:
+def fetch_articles():
     url = gdelt_query_url()
 
     try:
         resp = requests.get(
             url,
             timeout=40,
-            headers={
-                "User-Agent": "Mozilla/5.0 IranNewsBot/1.0"
-            },
+            headers={"User-Agent": "Mozilla/5.0 IranNewsBot/1.0"},
         )
-
-        if resp.status_code == 429:
-            return [], "뉴스 서버 요청이 많아 잠시 제한되었습니다."
-
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("articles", []), None
-
     except requests.exceptions.Timeout:
         return [], "뉴스 서버 응답이 지연되었습니다."
     except requests.exceptions.RequestException:
-        return [], "뉴스 수집 중 일시적인 오류가 발생했습니다."
+        return [], "뉴스 수집 요청에 실패했습니다."
+
+    if resp.status_code == 429:
+        return [], "뉴스 서버 요청이 많아 잠시 제한되었습니다."
+
+    if resp.status_code != 200:
+        return [], f"뉴스 서버 오류가 발생했습니다. (HTTP {resp.status_code})"
+
+    if not resp.text or not resp.text.strip():
+        return [], "뉴스 응답이 비어 있습니다."
+
+    try:
+        data = resp.json()
     except Exception:
-        return [], "뉴스 처리 중 알 수 없는 오류가 발생했습니다."
+        return [], "뉴스 응답 형식이 비정상입니다."
+
+    articles = data.get("articles", [])
+    if not isinstance(articles, list):
+        return [], "뉴스 데이터 구조가 예상과 다릅니다."
+
+    return articles, None
 
 
-def clean_articles(raw_articles: list[dict]) -> list[dict]:
+def clean_articles(raw_articles):
     cleaned = []
     seen = set()
 
     trusted_sources = [
-        "reuters", "ap", "bbc", "aljazeera", "bloomberg",
+        "reuters", "bbc", "ap", "aljazeera", "bloomberg",
         "ft", "cnn", "nytimes", "wsj", "cnbc", "guardian"
     ]
 
@@ -126,7 +134,7 @@ def clean_articles(raw_articles: list[dict]) -> list[dict]:
     return cleaned[:5]
 
 
-def summarize_in_korean(articles: list[dict], error_message: str | None) -> dict:
+def summarize_in_korean(articles, error_message):
     if error_message:
         return {
             "summary_title": "이란 전쟁 관련 시간대 브리핑",
@@ -153,13 +161,13 @@ def summarize_in_korean(articles: list[dict], error_message: str | None) -> dict
 
 규칙:
 - 반드시 JSON만 출력
-- 키: summary_title, summary_lines, article_lines
-- summary_title: 문자열 1개
-- summary_lines: 1~3개
-- article_lines: 최대 5개
+- 키는 summary_title, summary_lines, article_lines
+- summary_title은 문자열 1개
+- summary_lines는 1~3개
+- article_lines는 최대 5개
 - 추측 금지
-- 없는 내용 단정 금지
-- 한국어로 짧고 건조하게 요약
+- 기사에 없는 내용 단정 금지
+- 짧고 건조한 브리핑체
 - article_lines 각 항목 형식:
   "• [출처] 한줄 요약"
 
@@ -178,12 +186,12 @@ def summarize_in_korean(articles: list[dict], error_message: str | None) -> dict
     except Exception:
         return {
             "summary_title": "이란 전쟁 관련 시간대 브리핑",
-            "summary_lines": ["한글 요약 생성에 실패해 원문 제목 기준으로 전달합니다."],
+            "summary_lines": ["한글 요약 생성에 실패해 기사 제목 기준으로 전달합니다."],
             "article_lines": [f"• [{a['source']}] {a['title']}" for a in articles[:5]],
         }
 
 
-def build_message(summary: dict, articles: list[dict]) -> str:
+def build_message(summary, articles):
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
 
     lines = [
@@ -205,4 +213,42 @@ def build_message(summary: dict, articles: list[dict]) -> str:
     if articles:
         lines.append("")
         lines.append("원문 링크:")
-        for i, article in enumerate(articles[:5],
+        for i, article in enumerate(articles[:5], 1):
+            lines.append(f"{i}. {article['url']}")
+
+    return "\n".join(lines)
+
+
+def send_telegram_message(text):
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "disable_web_page_preview": True,
+    }
+    resp = requests.post(url, json=payload, timeout=40)
+    resp.raise_for_status()
+
+
+def main():
+    try:
+        raw_articles, error_message = fetch_articles()
+        articles = clean_articles(raw_articles)
+        summary = summarize_in_korean(articles, error_message)
+        message = build_message(summary, articles)
+        send_telegram_message(message)
+    except Exception as e:
+        fallback = (
+            "🛰 이란 전쟁 관련 시간대 브리핑\n"
+            f"기준시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST\n\n"
+            f"- 실행 중 오류가 발생했습니다: {str(e)[:200]}"
+        )
+        try:
+            send_telegram_message(fallback)
+        except Exception:
+            pass
+        raise
+
+
+if __name__ == "__main__":
+    main()
