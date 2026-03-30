@@ -25,16 +25,16 @@ def fetch_news():
     try:
         response = requests.get(url, params=params, timeout=20)
         if response.status_code != 200:
-            return []
+            return [], f"NewsAPI 오류: HTTP {response.status_code}"
         data = response.json()
-        return data.get("articles", [])
-    except Exception:
-        return []
+        return data.get("articles", []), None
+    except Exception as e:
+        return [], f"NewsAPI 호출 실패: {str(e)}"
 
 
 def summarize(articles):
     if not articles:
-        return "- 최근 주요 뉴스가 없습니다."
+        return "- 최근 주요 뉴스가 없습니다.", None
 
     titles = []
     for article in articles:
@@ -43,7 +43,7 @@ def summarize(articles):
             titles.append(title)
 
     if not titles:
-        return "- 최근 주요 뉴스가 없습니다."
+        return "- 최근 주요 뉴스가 없습니다.", None
 
     joined_titles = "\n".join(titles)
 
@@ -67,19 +67,19 @@ def summarize(articles):
             model="gpt-5-mini",
             input=prompt,
         )
-        text = response.output_text.strip()
 
+        text = (response.output_text or "").strip()
         if not text:
-            return "- 한국어 요약 생성에 실패했습니다."
+            return "- 한국어 요약 결과가 비어 있습니다.", "OpenAI 응답은 왔지만 output_text가 비어 있음"
 
-        return text
-    except Exception:
-        return "- 한국어 요약 생성에 실패했습니다."
+        return text, None
+
+    except Exception as e:
+        return "- 한국어 요약 생성에 실패했습니다.", f"OpenAI 오류: {str(e)}"
 
 
-def build_message(summary, articles):
+def build_message(summary, articles, news_error=None, summary_error=None):
     now = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
-
     message = f"🛰 이란 뉴스 브리핑\n기준시각: {now} KST\n\n{summary}"
 
     links = []
@@ -90,6 +90,13 @@ def build_message(summary, articles):
 
     if links:
         message += "\n\n원문 링크:\n" + "\n".join(links)
+
+    if news_error or summary_error:
+        message += "\n\n[디버그]"
+        if news_error:
+            message += f"\n- {news_error}"
+        if summary_error:
+            message += f"\n- {summary_error}"
 
     return message
 
@@ -105,9 +112,9 @@ def send_message(text):
 
 
 def main():
-    articles = fetch_news()
-    summary = summarize(articles)
-    message = build_message(summary, articles)
+    articles, news_error = fetch_news()
+    summary, summary_error = summarize(articles)
+    message = build_message(summary, articles, news_error, summary_error)
     send_message(message)
 
 
