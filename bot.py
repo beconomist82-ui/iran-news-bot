@@ -4,6 +4,7 @@ import json
 import html
 import hashlib
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 import requests
 from openai import OpenAI
@@ -23,45 +24,27 @@ def gdelt_query_url() -> str:
     now = datetime.now(UTC)
     start = now - timedelta(minutes=70)
 
-    start_str = start.strftime("%Y%m%d%H%M%S")
-    end_str = now.strftime("%Y%m%d%H%M%S")
-
-    query = """
-    (
-      (iran OR iranian OR tehran OR "islamic revolutionary guard corps" OR irgc)
-      AND
-      (war OR conflict OR strike OR airstrike OR missile OR drone OR military OR retaliation OR attack)
-    )
-    """.strip()
-
     params = {
-        "query": query,
+        "query": (
+            '(iran OR iranian OR tehran OR irgc OR "islamic revolutionary guard corps") '
+            'AND (war OR conflict OR strike OR airstrike OR missile OR drone OR attack OR retaliation)'
+        ),
         "mode": "ArtList",
-        "maxrecords": "30",
+        "maxrecords": "15",
         "format": "json",
         "sort": "DateDesc",
-        "startdatetime": start_str,
-        "enddatetime": end_str,
+        "startdatetime": start.strftime("%Y%m%d%H%M%S"),
+        "enddatetime": now.strftime("%Y%m%d%H%M%S"),
     }
-
-    from urllib.parse import urlencode
     return "https://api.gdeltproject.org/api/v2/doc/doc?" + urlencode(params)
 
 
-def fetch_articles() -> list[dict]:
-    url = gdelt_query_url()
-    resp = requests.get(url, timeout=40)
-    resp.raise_for_status()
-    data = resp.json()
-    return data.get("articles", [])
-
-
-def normalize_text(s: str) -> str:
-    if not s:
+def normalize_text(text: str) -> str:
+    if not text:
         return ""
-    s = html.unescape(s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
+    text = html.unescape(text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def normalize_url(url: str) -> str:
@@ -70,21 +53,47 @@ def normalize_url(url: str) -> str:
     return url.split("?")[0].strip().lower()
 
 
+def fetch_articles() -> tuple[list[dict], str | None]:
+    url = gdelt_query_url()
+
+    try:
+        resp = requests.get(
+            url,
+            timeout=40,
+            headers={
+                "User-Agent": "Mozilla/5.0 IranNewsBot/1.0"
+            },
+        )
+
+        if resp.status_code == 429:
+            return [], "뉴스 서버 요청이 많아 잠시 제한되었습니다."
+
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("articles", []), None
+
+    except requests.exceptions.Timeout:
+        return [], "뉴스 서버 응답이 지연되었습니다."
+    except requests.exceptions.RequestException:
+        return [], "뉴스 수집 중 일시적인 오류가 발생했습니다."
+    except Exception:
+        return [], "뉴스 처리 중 알 수 없는 오류가 발생했습니다."
+
+
 def clean_articles(raw_articles: list[dict]) -> list[dict]:
     cleaned = []
     seen = set()
 
-    source_whitelist = {
-        "reuters", "apnews", "bbc", "aljazeera", "cnn",
-        "ft", "nytimes", "washingtonpost", "theguardian",
-        "bloomberg", "cnbc", "wsj"
-    }
+    trusted_sources = [
+        "reuters", "ap", "bbc", "aljazeera", "bloomberg",
+        "ft", "cnn", "nytimes", "wsj", "cnbc", "guardian"
+    ]
 
-    for a in raw_articles:
-        title = normalize_text(a.get("title", ""))
-        url = normalize_url(a.get("url", ""))
-        source = normalize_text(a.get("sourceCommonName", "") or a.get("domain", ""))
-        seendate = normalize_text(a.get("seendate", ""))
+    for article in raw_articles:
+        title = normalize_text(article.get("title", ""))
+        url = normalize_url(article.get("url", ""))
+        source = normalize_text(article.get("sourceCommonName", "") or article.get("domain", ""))
+        seendate = normalize_text(article.get("seendate", ""))
 
         if not title or not url:
             continue
@@ -95,15 +104,14 @@ def clean_articles(raw_articles: list[dict]) -> list[dict]:
         seen.add(dedupe_key)
 
         score = 0
-        lowered_source = source.lower()
+        lower_title = title.lower()
+        lower_source = source.lower()
 
-        if any(s in lowered_source for s in source_whitelist):
+        if any(s in lower_source for s in trusted_sources):
             score += 3
-
-        if any(k in title.lower() for k in ["iran", "iranian", "tehran", "irgc"]):
+        if any(k in lower_title for k in ["iran", "iranian", "tehran", "irgc"]):
             score += 2
-
-        if any(k in title.lower() for k in ["missile", "drone", "strike", "attack", "retaliation", "war"]):
+        if any(k in lower_title for k in ["missile", "drone", "strike", "attack", "war", "retaliation"]):
             score += 2
 
         cleaned.append({
@@ -115,14 +123,21 @@ def clean_articles(raw_articles: list[dict]) -> list[dict]:
         })
 
     cleaned.sort(key=lambda x: (x["score"], x["seendate"]), reverse=True)
-    return cleaned[:8]
+    return cleaned[:5]
 
 
-def make_openai_summary(articles: list[dict]) -> dict:
+def summarize_in_korean(articles: list[dict], error_message: str | None) -> dict:
+    if error_message:
+        return {
+            "summary_title": "이란 전쟁 관련 시간대 브리핑",
+            "summary_lines": [error_message],
+            "article_lines": [],
+        }
+
     if not articles:
         return {
             "summary_title": "이란 전쟁 관련 시간대 브리핑",
-            "summary_lines": ["지난 1시간 기준으로 두드러진 신규 기사 포착이 없습니다."],
+            "summary_lines": ["지난 1시간 기준으로 두드러진 신규 기사가 없습니다."],
             "article_lines": [],
         }
 
@@ -134,48 +149,43 @@ def make_openai_summary(articles: list[dict]) -> dict:
     )
 
     prompt = f"""
-너는 국제뉴스 브리핑 에디터다.
-아래 기사 목록만 근거로, 한국어로 매우 간결하게 브리핑을 작성해라.
+아래 기사 목록만 근거로 한국어 브리핑을 작성해라.
 
-출력 규칙:
-- 반드시 JSON 객체만 출력
-- 키는 summary_title, summary_lines, article_lines
-- summary_title: 1줄 문자열
-- summary_lines: 문자열 배열 3개 이하
-- article_lines: 문자열 배열 최대 5개
+규칙:
+- 반드시 JSON만 출력
+- 키: summary_title, summary_lines, article_lines
+- summary_title: 문자열 1개
+- summary_lines: 1~3개
+- article_lines: 최대 5개
 - 추측 금지
-- 기사에 없는 내용 단정 금지
-- 서로 비슷한 내용은 합쳐라
-- 전문용어보다 자연스러운 한국어 사용
-- 톤은 건조한 브리핑체
-- article_lines 각 항목은 다음 형식:
-  "• [출처] 한글 한줄 요약"
+- 없는 내용 단정 금지
+- 한국어로 짧고 건조하게 요약
+- article_lines 각 항목 형식:
+  "• [출처] 한줄 요약"
 
 기사 목록:
 {article_text}
 """
 
-    response = client.responses.create(
-        model="gpt-5-mini",
-        input=prompt
-    )
-
-    text = response.output_text.strip()
-
     try:
+        response = client.responses.create(
+            model="gpt-5-mini",
+            input=prompt,
+        )
+        text = response.output_text.strip()
         data = json.loads(text)
-    except json.JSONDecodeError:
-        data = {
+        return data
+    except Exception:
+        return {
             "summary_title": "이란 전쟁 관련 시간대 브리핑",
-            "summary_lines": ["모델 응답 파싱에 실패해 기사 원문 제목 기준으로 전달합니다."],
+            "summary_lines": ["한글 요약 생성에 실패해 원문 제목 기준으로 전달합니다."],
             "article_lines": [f"• [{a['source']}] {a['title']}" for a in articles[:5]],
         }
-
-    return data
 
 
 def build_message(summary: dict, articles: list[dict]) -> str:
     now_kst = datetime.now(KST).strftime("%Y-%m-%d %H:%M")
+
     lines = [
         f"🛰 {summary.get('summary_title', '이란 전쟁 관련 시간대 브리핑')}",
         f"기준시각: {now_kst} KST",
@@ -185,39 +195,14 @@ def build_message(summary: dict, articles: list[dict]) -> str:
     for item in summary.get("summary_lines", []):
         lines.append(f"- {item}")
 
-    if summary.get("article_lines"):
+    article_lines = summary.get("article_lines", [])
+    if article_lines:
         lines.append("")
         lines.append("주요 기사:")
-        for item in summary["article_lines"][:5]:
+        for item in article_lines[:5]:
             lines.append(item)
 
     if articles:
         lines.append("")
         lines.append("원문 링크:")
-        for idx, a in enumerate(articles[:5], 1):
-            lines.append(f"{idx}. {a['url']}")
-
-    return "\n".join(lines)
-
-
-def send_telegram_message(text: str) -> None:
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "disable_web_page_preview": True,
-    }
-    resp = requests.post(url, json=payload, timeout=40)
-    resp.raise_for_status()
-
-
-def main() -> None:
-    articles = fetch_articles()
-    articles = clean_articles(articles)
-    summary = make_openai_summary(articles)
-    message = build_message(summary, articles)
-    send_telegram_message(message)
-
-
-if __name__ == "__main__":
-    main()
+        for i, article in enumerate(articles[:5],
